@@ -82,6 +82,11 @@ pub fn isoToXy(v: m.Vector2) m.Vector2 {
     };
 }
 
+pub fn wrapAround(v: m.Vector2) m.Vector2 {
+    // TODO: ensure wraparound is valid for chunk
+    return .{ .x = @mod(v.x, view_size), .y = @mod(v.y, view_size) };
+}
+
 pub fn drawGridTile(tex: c.Texture, x: i32, y: i32) void {
     drawGridTileTinted(tex, x, y, c.WHITE);
 }
@@ -108,10 +113,9 @@ const Map = struct {
     const Self = @This();
 
     fn getTile(self: Self, pos: m.Vector2i) TileType {
-        assert(0 <= pos.x);
-        assert(pos.x < self.width);
-        assert(0 <= pos.y);
-        assert(pos.y < self.height);
+        if (!(0 <= pos.x and pos.x < self.width and 0 <= pos.y and pos.y < self.height)) {
+            return .nothing;
+        }
         const pixel = self.pixels[
             @intCast(usize, pos.y) *
                 self.width +
@@ -133,31 +137,112 @@ var camera = c.Camera2D{
     .zoom = 2,
 };
 
-fn walkToGoal(pos: *m.Vector2, goal: m.Vector2, hero: SpriteSheet) void {
+const QueueValue = std.meta.Tuple(&[_]type{ m.Vector2i, f32 });
+fn compareQueueValues(_: void, a: QueueValue, b: QueueValue) std.math.Order {
+    return std.math.order(a.@"1", b.@"1");
+}
+
+fn findPath(allocator: std.mem.Allocator, map: Map, start: m.Vector2i, goal: m.Vector2i) !?std.ArrayList(m.Vector2i) {
+    var queue = std.PriorityQueue(QueueValue, void, compareQueueValues).init(allocator, {});
+    defer queue.deinit();
+
+    var came_from = std.AutoHashMap(m.Vector2i, ?m.Vector2i).init(allocator);
+    defer came_from.deinit();
+
+    var cost_so_far = std.AutoHashMap(m.Vector2i, f32).init(allocator);
+    defer cost_so_far.deinit();
+
+    try queue.add(.{ start, 0 });
+    try came_from.put(start, null);
+    try cost_so_far.put(start, 0);
+
+    while (queue.len != 0) {
+        const current = queue.remove().@"0";
+
+        if (eql(current, goal)) {
+            break;
+        }
+
+        const neighbors = [_]m.Vector2i{
+            .{ .x = current.x - 1, .y = current.y },
+            .{ .x = current.x, .y = current.y - 1 },
+            .{ .x = current.x + 1, .y = current.y },
+            .{ .x = current.x, .y = current.y + 1 },
+        };
+
+        for (neighbors) |n| {
+            if (map.getTile(n) == .floor) {
+                // NOTE: could use a cost function here
+                const new_cost = cost_so_far.get(current).? + 1;
+                if (!cost_so_far.contains(n) or new_cost < cost_so_far.get(n).?) {
+                    try cost_so_far.put(n, new_cost);
+                    try queue.add(.{ n, new_cost });
+                    try came_from.put(n, current);
+                }
+            }
+        }
+    }
+
+    if (came_from.get(goal) == null) {
+        return null;
+    }
+
+    var path = std.ArrayList(m.Vector2i).init(allocator);
+
+    // reconstruct path
+    var current = goal;
+    while (!eql(current, start)) {
+        try path.append(current);
+        current = came_from.get(current).?.?;
+    }
+
+    std.mem.reverse(m.Vector2i, path.items);
+
+    return path;
+}
+
+pub fn frameCompleted(frame: anyframe) bool {
+    return std.mem.allEqual(u8, @ptrCast([*]const u8, frame)[8..24][0..16], std.math.maxInt(u8));
+}
+
+fn walkToGoal(map: Map, pos: *m.Vector2, goal: m.Vector2, hero: SpriteSheet) void {
+    var maybe_path = findPath(gpa.allocator(), map, v2i(pos.*), v2i(goal)) catch unreachable;
+    if (maybe_path == null) {
+        return;
+    }
+
+    var path = maybe_path.?;
+
+    var path_i: usize = 0;
+    defer path.deinit();
+
     var t: f32 = 0;
     var last_pos = pos.*;
-    while (true) {
+    while (path_i < path.items.len) {
         suspend {}
+
+        // animate/draw
         hero.drawFrameIso(pos.*, @floatToInt(usize, @mod(t * 8, 4)), last_pos.x - pos.x < 0);
         t += c.GetFrameTime();
 
+        // move
         {
-            const diff = m.Vector2Subtract(goal, pos.*);
+            const diff = m.Vector2Subtract(path.items[path_i].toVector2(), pos.*);
             last_pos = pos.*;
             if (m.Vector2Length(diff) > 0.1) {
                 pos.* = m.Vector2Add(pos.*, m.Vector2Scale(diff, 1 / (m.Vector2Length(diff) * 10)));
             } else {
-                pos.* = goal;
-                break;
+                pos.* = path.items[path_i].toVector2();
+                path_i += 1;
             }
         }
     }
-    hero_movement = null;
 }
 
 var hero_movement: ?anyframe = null;
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
-pub fn main() void {
+pub fn main() !void {
     c.InitWindow(screen_width, screen_height, "game");
     c.SetTargetFPS(60);
 
@@ -233,10 +318,8 @@ pub fn main() void {
                     }) |v| {
                         const gx = v.x + @intCast(i32, chunk_off_x);
                         const gy = v.y + @intCast(i32, chunk_off_y);
-                        if (0 <= gx and gx < map.width and 0 <= gy and gy < map.height) {
-                            if (map.getTile(.{ .x = gx, .y = gy }) == .floor) {
-                                drawGridTileTinted(iso_floor, v.x, v.y, c.GRAY);
-                            }
+                        if (map.getTile(.{ .x = gx, .y = gy }) == .floor) {
+                            drawGridTileTinted(iso_floor, v.x, v.y, c.GRAY);
                         }
                     }
                 }
@@ -267,8 +350,8 @@ pub fn main() void {
             assert(map.getTile(v2i(state.hero.pos)) == .floor);
         }
 
-        if (hero_movement) |frame| {
-            resume frame;
+        if (hero_movement != null and !frameCompleted(hero_movement.?)) {
+            resume hero_movement.?;
         } else {
             hero.drawFrameIso(state.hero.pos, 0, false);
         }
@@ -276,16 +359,21 @@ pub fn main() void {
         if (c.IsMouseButtonReleased(c.MOUSE_BUTTON_LEFT)) {
             const v = c.GetScreenToWorld2D(c.GetMousePosition(), camera);
             const p = m.Vector2Add(isoToXy(v), .{ .x = @intToFloat(f32, chunk_off_x), .y = @intToFloat(f32, chunk_off_y) + 1 });
-            state.hero.goal = v2i(p);
 
-            hero_movement = &async walkToGoal(&state.hero.pos, state.hero.goal.toVector2(), hero);
+            if (try findPath(gpa.allocator(), map, v2i(state.hero.pos), v2i(p))) |path| {
+                path.deinit();
 
-            const global_goal = state.hero.goal.toVector2();
-            c.DrawCircleV(xyToIso(.{ .x = @mod(global_goal.x, view_size), .y = @mod(global_goal.y, view_size) }), 3, c.GREEN);
+                state.hero.goal = v2i(p);
+                hero_movement = &async walkToGoal(map, &state.hero.pos, state.hero.goal.toVector2(), hero);
+                const global_goal = state.hero.goal.toVector2();
+                c.DrawCircleV(xyToIso(wrapAround(global_goal)), 3, c.GREEN);
+            }
         }
 
         c.EndMode2D();
     }
 
     c.CloseWindow();
+
+    std.debug.assert(!gpa.deinit());
 }
