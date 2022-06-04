@@ -205,16 +205,16 @@ pub fn frameCompleted(frame: anyframe) bool {
     return std.mem.allEqual(u8, @ptrCast([*]const u8, frame)[8..24][0..16], std.math.maxInt(u8));
 }
 
-fn walkToGoal(map: Map, pos: *m.Vector2, goal: m.Vector2, hero: SpriteSheet) void {
-    var maybe_path = findPath(gpa.allocator(), map, v2i(pos.*), v2i(goal)) catch unreachable;
+fn walkToGoal(allocator: std.mem.Allocator, map: Map, pos: *m.Vector2, goal: m.Vector2, hero: SpriteSheet) void {
+    var maybe_path = findPath(allocator, map, v2i(pos.*), v2i(goal)) catch unreachable;
     if (maybe_path == null) {
         return;
     }
 
     var path = maybe_path.?;
+    defer path.deinit();
 
     var path_i: usize = 0;
-    defer path.deinit();
 
     var t: f32 = 0;
     var last_pos = pos.*;
@@ -240,11 +240,12 @@ fn walkToGoal(map: Map, pos: *m.Vector2, goal: m.Vector2, hero: SpriteSheet) voi
 }
 
 var hero_movement: ?anyframe = null;
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
 pub fn main() !void {
     c.InitWindow(screen_width, screen_height, "game");
     c.SetTargetFPS(60);
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
     const iso_floor = c.LoadTexture("iso_floor.png");
     //const iso_cube = c.LoadTexture("iso_cube.png");
@@ -274,6 +275,9 @@ pub fn main() !void {
 
     state.hero.pos = start;
     state.hero.goal = v2i(start);
+
+    // scratch arena
+    var hero_movement_arena = std.heap.ArenaAllocator.init(gpa.allocator());
 
     while (!c.WindowShouldClose()) {
         c.BeginDrawing();
@@ -350,10 +354,19 @@ pub fn main() !void {
             assert(map.getTile(v2i(state.hero.pos)) == .floor);
         }
 
-        if (hero_movement != null and !frameCompleted(hero_movement.?)) {
-            resume hero_movement.?;
-        } else {
-            hero.drawFrameIso(state.hero.pos, 0, false);
+        {
+            if (hero_movement != null and frameCompleted(hero_movement.?)) {
+                // free scratch
+                hero_movement_arena.deinit();
+                hero_movement_arena = std.heap.ArenaAllocator.init(gpa.allocator());
+                hero_movement = null;
+            }
+
+            if (hero_movement) |frame| {
+                resume frame;
+            } else {
+                hero.drawFrameIso(state.hero.pos, 0, false);
+            }
         }
 
         if (c.IsMouseButtonReleased(c.MOUSE_BUTTON_LEFT)) {
@@ -364,7 +377,7 @@ pub fn main() !void {
                 path.deinit();
 
                 state.hero.goal = v2i(p);
-                hero_movement = &async walkToGoal(map, &state.hero.pos, state.hero.goal.toVector2(), hero);
+                hero_movement = &async walkToGoal(hero_movement_arena.allocator(), map, &state.hero.pos, state.hero.goal.toVector2(), hero);
                 const global_goal = state.hero.goal.toVector2();
                 c.DrawCircleV(xyToIso(wrapAround(global_goal)), 3, c.GREEN);
             }
