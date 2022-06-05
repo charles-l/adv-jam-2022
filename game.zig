@@ -16,6 +16,14 @@ const block_depth = block_height / 2;
 
 const view_size = 16;
 
+const DrawCall = std.meta.Tuple(&[_]type{ c.Texture, c.Rectangle, c.Rectangle, c.Vector2, f32, c.Color });
+
+fn drawCallLt(comptime _: type, lhs: anytype, rhs: anytype) bool {
+    const lhs_pos = .{ .x = lhs.@"2".x, .y = lhs.@"2".y };
+    const rhs_pos = .{ .x = rhs.@"2".x, .y = rhs.@"2".y };
+    return lhs_pos.y < rhs_pos.y;
+}
+
 const SpriteSheet = struct {
     texture: c.Texture,
     frames: usize,
@@ -35,12 +43,12 @@ const SpriteSheet = struct {
     }
 
     /// rotation is in degrees
-    fn drawFrameEx(self: Self, pos: m.Vector2, rotation: f32, i: usize, alpha: f32, fliph: bool) void {
+    fn drawFrameEx(self: Self, pos: m.Vector2, rotation: f32, i: usize, alpha: f32, fliph: bool) DrawCall {
         var r = self.frameRect(i);
         if (fliph) {
             r.width = -r.width;
         }
-        c.DrawTexturePro(
+        return DrawCall{
             self.texture,
             r,
             c.Rectangle{
@@ -55,11 +63,18 @@ const SpriteSheet = struct {
             },
             rotation,
             c.Color{ .r = 255, .g = 255, .b = 255, .a = @floatToInt(u8, 255 * alpha) },
-        );
+        };
     }
 
-    fn drawFrameIso(self: Self, pos: m.Vector2, i: usize, fliph: bool) void {
-        self.drawFrameEx(xyToIso(.{
+    fn drawFrameIsoTile(self: Self, pos: m.Vector2, i: usize) DrawCall {
+        return self.drawFrameEx(m.Vector2Add(xyToIso(.{
+            .x = @mod(pos.x, view_size),
+            .y = @mod(pos.y, view_size),
+        }), .{ .x = 0, .y = block_height / 2 }), 0, i, 1, false);
+    }
+
+    fn drawFrameIso(self: Self, pos: m.Vector2, i: usize, fliph: bool) DrawCall {
+        return self.drawFrameEx(xyToIso(.{
             .x = @mod(pos.x, view_size),
             .y = @mod(pos.y, view_size),
         }), 0, i, 1, fliph);
@@ -72,6 +87,10 @@ pub fn v2i(v: m.Vector2) m.Vector2i {
 
 pub fn xyToIso(v: m.Vector2) m.Vector2 {
     return .{ .x = (v.x - v.y) * block_height, .y = ((v.x + v.y) / 2) * block_height };
+}
+
+pub fn xyToIsoTile(v: m.Vector2) m.Vector2 {
+    return m.Vector2Add(xyToIso(wrapAround(v)), .{ .x = block_width / 2, .y = 0 });
 }
 
 pub fn isoToXy(v: m.Vector2) m.Vector2 {
@@ -87,23 +106,36 @@ pub fn wrapAround(v: m.Vector2) m.Vector2 {
     return .{ .x = @mod(v.x, view_size), .y = @mod(v.y, view_size) };
 }
 
-pub fn drawGridTile(tex: c.Texture, x: i32, y: i32) void {
-    drawGridTileTinted(tex, x, y, c.WHITE);
+pub fn drawGridTile(tex: c.Texture, x: i32, y: i32) DrawCall {
+    return drawGridTileTinted(tex, x, y, c.WHITE);
 }
 
-pub fn drawGridTileTinted(tex: c.Texture, x: i32, y: i32, color: c.Color) void {
+pub fn drawGridTileTinted(tex: c.Texture, x: i32, y: i32, color: c.Color) DrawCall {
     var v = xyToIso(.{ .x = @intToFloat(f32, x), .y = @intToFloat(f32, y) });
     v.y += block_height / 2 - @intToFloat(f32, tex.height);
-    c.DrawTextureV(tex, v, color);
+    const w = @intToFloat(f32, tex.width);
+    const h = @intToFloat(f32, tex.height);
+    var d = DrawCall{
+        tex,
+        c.Rectangle{ .x = 0, .y = 0, .width = w, .height = h },
+        c.Rectangle{ .x = v.x, .y = v.y, .width = w, .height = h },
+        m.Vector2Zero(),
+        0,
+        color,
+    };
+    //@call(.{}, c.DrawTexturePro, d);
+    return d;
 }
 
 const Map = struct {
     const TileType = enum {
         nothing,
         floor,
+        fire,
     };
 
-    const start_marker = c.Color{ .r = 255, .g = 0, .b = 0, .a = 255 };
+    const start_marker = c.Color{ .r = 255, .g = 0, .b = 255, .a = 255 };
+    const fire_element = c.Color{ .r = 255, .g = 0, .b = 0, .a = 255 };
     const floor_marker = c.Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
 
     pixels: []c.Color,
@@ -124,9 +156,20 @@ const Map = struct {
 
         if (eql(pixel, floor_marker) or eql(pixel, start_marker)) {
             return .floor;
+        } else if (eql(pixel, fire_element)) {
+            return .fire;
         } else {
             return .nothing;
         }
+    }
+
+    fn inSameChunk(pos1: m.Vector2i, pos2: m.Vector2i) bool {
+        const chunk_off_x = @divTrunc(pos1.x, view_size) * view_size;
+        const chunk_off_y = @divTrunc(pos1.y, view_size) * view_size;
+        return (chunk_off_x <= pos2.x and
+            pos2.x < chunk_off_x + view_size and
+            chunk_off_y <= pos2.y and
+            pos2.y < chunk_off_y + view_size);
     }
 };
 
@@ -205,7 +248,71 @@ pub fn frameCompleted(frame: anyframe) bool {
     return std.mem.allEqual(u8, @ptrCast([*]const u8, frame)[8..24][0..16], std.math.maxInt(u8));
 }
 
-fn walkToGoal(allocator: std.mem.Allocator, map: Map, pos: *m.Vector2, goal: m.Vector2, hero: SpriteSheet) void {
+pub fn isoMousePos(state: anytype) m.Vector2i {
+    const chunk_off_x = @floatToInt(usize, state.hero.pos.x / view_size) * view_size;
+    const chunk_off_y = @floatToInt(usize, state.hero.pos.y / view_size) * view_size;
+
+    const p = c.GetScreenToWorld2D(c.GetMousePosition(), camera);
+    return v2i(m.Vector2Add(isoToXy(p), .{ .x = @intToFloat(f32, chunk_off_x), .y = @intToFloat(f32, chunk_off_y) + 1 }));
+}
+
+fn lastIndexOf(comptime T: type, haystack: []const T, needle: T) ?usize {
+    var i = haystack.len;
+    while (i > 0) {
+        i -= 1;
+        if (eql(needle, haystack[i])) {
+            return i;
+        }
+    }
+    return null;
+}
+
+test "lastIndexOf" {
+    try std.testing.expect(lastIndexOf(u32, &[_]u32{ 1, 2, 3 }, 3).? == 2);
+    try std.testing.expect(lastIndexOf(u32, &[_]u32{ 1, 2, 3 }, 1).? == 0);
+    try std.testing.expect(lastIndexOf(u32, &[_]u32{ 1, 2, 3, 1 }, 1).? == 3);
+}
+
+fn drawCast(allocator: std.mem.Allocator, state: anytype, map: Map) std.BoundedArray(m.Vector2i, 16) {
+    var cast_path = std.BoundedArray(m.Vector2i, 16).init(0) catch unreachable;
+    while (!c.IsMouseButtonReleased(c.MOUSE_BUTTON_RIGHT)) {
+        assert(c.IsMouseButtonDown(c.MOUSE_BUTTON_RIGHT));
+        var mouse_tile = isoMousePos(state);
+        const prev_index = lastIndexOf(m.Vector2i, cast_path.slice(), mouse_tile);
+        if (map.getTile(mouse_tile) == .floor and Map.inSameChunk(v2i(state.hero.pos), mouse_tile) and (prev_index == null or (cast_path.slice().len > 1 and prev_index.? == 0))) {
+            cast_path.append(mouse_tile) catch {};
+        }
+
+        if (cast_path.len > 0) {
+            var i: usize = 0;
+            while (i < cast_path.len - 1) : (i += 1) {
+                c.DrawLineV(
+                    xyToIsoTile(cast_path.get(i).toVector2()),
+                    xyToIsoTile(cast_path.get(i + 1).toVector2()),
+                    c.RED,
+                );
+            }
+        }
+        suspend {}
+    }
+
+    var reachable = false;
+    if (cast_path.len > 0) {
+        var p = findPath(allocator, map, v2i(state.hero.pos), cast_path.slice()[0]) catch unreachable;
+        if (p) |d| {
+            d.deinit();
+            reachable = true;
+        }
+    }
+    if (reachable) {
+        print("reachable path\n", .{});
+    } else {
+        print("unreachable\n", .{});
+    }
+    return cast_path;
+}
+
+fn walkToGoal(allocator: std.mem.Allocator, draw_calls: *std.ArrayList(DrawCall), map: Map, pos: *m.Vector2, goal: m.Vector2, hero: SpriteSheet) void {
     var maybe_path = findPath(allocator, map, v2i(pos.*), v2i(goal)) catch unreachable;
     if (maybe_path == null) {
         return;
@@ -222,7 +329,7 @@ fn walkToGoal(allocator: std.mem.Allocator, map: Map, pos: *m.Vector2, goal: m.V
         suspend {}
 
         // animate/draw
-        hero.drawFrameIso(pos.*, @floatToInt(usize, @mod(t * 8, 4)), xyToIso(pos.*).x - xyToIso(last_pos).x > 0);
+        draw_calls.append(hero.drawFrameIso(pos.*, @floatToInt(usize, @mod(t * 8, 4)), xyToIso(pos.*).x - xyToIso(last_pos).x > 0)) catch @panic("couldn't add draw call");
         t += c.GetFrameTime();
 
         // move
@@ -239,15 +346,28 @@ fn walkToGoal(allocator: std.mem.Allocator, map: Map, pos: *m.Vector2, goal: m.V
     }
 }
 
-var hero_movement: ?anyframe = null;
+fn highlightTile(tile: m.Vector2) void {
+    var t = c.GetTime();
+    while (c.GetTime() - t < 2) {
+        var fade = @floatCast(f32, 1 - ((c.GetTime() - t) / 2));
+        var p = xyToIso(wrapAround(tile));
+        var poly = [_]m.Vector2{
+            p, .{ .x = p.x + block_width / 2, .y = p.y - block_height / 2 }, .{ .x = p.x + block_width, .y = p.y }, .{ .x = p.x + block_width / 2, .y = p.y + block_height / 2 }, p,
+        };
+        c.DrawLineStrip(&poly[0], poly.len, c.Fade(c.YELLOW, fade));
+        suspend {}
+    }
+}
 
 pub fn main() !void {
     c.InitWindow(screen_width, screen_height, "game");
     c.SetTargetFPS(60);
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(!gpa.deinit());
 
     const iso_floor = c.LoadTexture("iso_floor.png");
+    const fire_floor = SpriteSheet{ .texture = c.LoadTexture("floor_fire.png"), .frames = 5 };
     //const iso_cube = c.LoadTexture("iso_cube.png");
     const hero = SpriteSheet{ .texture = c.LoadTexture("hero.png"), .frames = 4 };
     const map_image = c.LoadImage("map1.png");
@@ -276,16 +396,30 @@ pub fn main() !void {
     state.hero.pos = start;
     state.hero.goal = v2i(start);
 
+    var highlight_tile: ?anyframe = null;
+
+    var hero_movement: ?anyframe = null;
     // scratch arena
     var hero_movement_arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer hero_movement_arena.deinit();
+
+    var draw_cast: ?anyframe = null;
+    var draw_cast_arena = std.heap.ArenaAllocator.init(gpa.allocator());
+    defer draw_cast_arena.deinit();
+
+    var draw_calls = std.ArrayList(DrawCall).init(gpa.allocator());
+    defer draw_calls.deinit();
+
+    var overlay = c.LoadRenderTexture(screen_width, screen_height);
 
     while (!c.WindowShouldClose()) {
         c.BeginDrawing();
         defer c.EndDrawing();
 
-        c.BeginMode2D(camera);
+        c.BeginTextureMode(overlay);
 
-        c.ClearBackground(c.GRAY);
+        c.BeginMode2D(camera);
+        c.ClearBackground(c.BLANK);
 
         const chunk_off_x = @floatToInt(usize, state.hero.pos.x / view_size) * view_size;
         const chunk_off_y = @floatToInt(usize, state.hero.pos.y / view_size) * view_size;
@@ -306,7 +440,9 @@ pub fn main() !void {
             for (map_chunk) |row, y| {
                 for (row) |tile, x| {
                     if (tile == .floor) {
-                        drawGridTile(iso_floor, @intCast(i32, x), @intCast(i32, y));
+                        try draw_calls.append(drawGridTile(iso_floor, @intCast(i32, x), @intCast(i32, y)));
+                    } else if (tile == .fire) {
+                        try draw_calls.append(fire_floor.drawFrameIsoTile(.{ .x = @intToFloat(f32, x), .y = @intToFloat(f32, y) }, @floatToInt(usize, @mod(c.GetTime(), 5 * 0.1) / 0.1)));
                     }
                 }
             }
@@ -323,7 +459,7 @@ pub fn main() !void {
                         const gx = v.x + @intCast(i32, chunk_off_x);
                         const gy = v.y + @intCast(i32, chunk_off_y);
                         if (map.getTile(.{ .x = gx, .y = gy }) == .floor) {
-                            drawGridTileTinted(iso_floor, v.x, v.y, c.GRAY);
+                            try draw_calls.append(drawGridTileTinted(iso_floor, v.x, v.y, c.GRAY));
                         }
                     }
                 }
@@ -365,28 +501,75 @@ pub fn main() !void {
             if (hero_movement) |frame| {
                 resume frame;
             } else {
-                hero.drawFrameIso(state.hero.pos, 0, false);
+                try draw_calls.append(hero.drawFrameIso(state.hero.pos, 0, false));
+            }
+        }
+
+        {
+            if (draw_cast != null and frameCompleted(draw_cast.?)) {
+                draw_cast_arena.deinit();
+                draw_cast_arena = std.heap.ArenaAllocator.init(gpa.allocator());
+                draw_cast = null;
+            }
+
+            if (draw_cast) |frame| {
+                resume frame;
+            } else {
+                if (c.IsMouseButtonPressed(c.MOUSE_BUTTON_RIGHT)) {
+                    draw_cast = &async drawCast(draw_cast_arena.allocator(), state, map);
+                }
+            }
+        }
+
+        {
+            if (highlight_tile != null and frameCompleted(highlight_tile.?)) {
+                highlight_tile = null;
+            }
+            if (highlight_tile) |frame| {
+                resume frame;
             }
         }
 
         if (c.IsMouseButtonReleased(c.MOUSE_BUTTON_LEFT)) {
-            const v = c.GetScreenToWorld2D(c.GetMousePosition(), camera);
-            const p = m.Vector2Add(isoToXy(v), .{ .x = @intToFloat(f32, chunk_off_x), .y = @intToFloat(f32, chunk_off_y) + 1 });
+            const p = isoMousePos(state);
 
-            if (try findPath(gpa.allocator(), map, v2i(state.hero.pos), v2i(p))) |path| {
+            if (try findPath(gpa.allocator(), map, v2i(state.hero.pos), p)) |path| {
                 path.deinit();
 
-                state.hero.goal = v2i(p);
-                hero_movement = &async walkToGoal(hero_movement_arena.allocator(), map, &state.hero.pos, state.hero.goal.toVector2(), hero);
+                state.hero.goal = p;
+                highlight_tile = &async highlightTile(state.hero.goal.toVector2());
+                hero_movement = &async walkToGoal(hero_movement_arena.allocator(), &draw_calls, map, &state.hero.pos, state.hero.goal.toVector2(), hero);
                 const global_goal = state.hero.goal.toVector2();
                 c.DrawCircleV(xyToIso(wrapAround(global_goal)), 3, c.GREEN);
             }
         }
 
         c.EndMode2D();
+
+        c.EndTextureMode();
+
+        c.ClearBackground(c.GRAY);
+
+        c.BeginMode2D(camera);
+
+        std.sort.sort(DrawCall, draw_calls.items, void, drawCallLt);
+        for (draw_calls.items) |args| {
+            @call(.{}, c.DrawTexturePro, args);
+        }
+
+        c.EndMode2D();
+
+        c.DrawTextureRec(
+            overlay.texture,
+            .{ .x = 0, .y = 0, .width = @intToFloat(f32, overlay.texture.width), .height = -@intToFloat(f32, overlay.texture.height) },
+            .{ .x = 0, .y = 0 },
+            c.WHITE,
+        );
+
+        draw_calls.clearRetainingCapacity();
     }
 
-    c.CloseWindow();
+    c.UnloadRenderTexture(overlay);
 
-    std.debug.assert(!gpa.deinit());
+    c.CloseWindow();
 }
