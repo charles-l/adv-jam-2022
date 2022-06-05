@@ -222,7 +222,7 @@ fn walkToGoal(allocator: std.mem.Allocator, map: Map, pos: *m.Vector2, goal: m.V
         suspend {}
 
         // animate/draw
-        hero.drawFrameIso(pos.*, @floatToInt(usize, @mod(t * 8, 4)), last_pos.x - pos.x < 0);
+        hero.drawFrameIso(pos.*, @floatToInt(usize, @mod(t * 8, 4)), xyToIso(pos.*).x - xyToIso(last_pos).x > 0);
         t += c.GetFrameTime();
 
         // move
