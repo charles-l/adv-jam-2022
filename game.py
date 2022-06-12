@@ -41,7 +41,7 @@ class V:
     def __hash__(self):
         return hash((self.x, self.y))
 
-    def trunc(self):
+    def floor(self):
         return V(int(self.x), int(self.y))
 
     def length(self):
@@ -148,8 +148,22 @@ def draw_grid_tile(tex: rl.Texture, pos: Tuple[int, int], color = rl.WHITE) -> D
         color
         )
 
+def highlight_tile(tile):
+    TIME = 0.4
+    start = rl.get_time()
+    while (diff := rl.get_time() - start) < TIME:
+        p = xy_to_iso(tile % VIEW_SIZE)
+        poly = [p,
+                p + V(BLOCK_WIDTH / 2, -BLOCK_HEIGHT / 2),
+                p + V(BLOCK_WIDTH, 0),
+                p + V(BLOCK_WIDTH / 2, BLOCK_HEIGHT / 2),
+                p]
+        rl.draw_line_strip([rl.Vector2(*x) for x in poly], len(poly), rl.fade(rl.YELLOW, 1 - (diff / TIME)))
+        yield
+
+
 def walk_path(maparr, hero, goal):
-    path = find_path(hero.pos, goal)
+    path = find_path(hero.pos.floor(), goal)
     if not path:
         return
 
@@ -230,8 +244,11 @@ camera = rl.Camera2D(
     )
 
 hero_action = None
+ui_coros = []
 
 while not rl.window_should_close():
+    chunk_offset = (state.hero.pos // VIEW_SIZE) * VIEW_SIZE
+
     # logic
     if rl.is_key_pressed(rl.KEY_W):
         state.hero.pos += V(0, 1)
@@ -245,15 +262,16 @@ while not rl.window_should_close():
     if rl.is_mouse_button_released(rl.MOUSE_BUTTON_LEFT):
         p = iso_mouse_pos(state)
 
-        hero_action = walk_path(maparr, state.hero, p.trunc())
+        if find_path(state.hero.pos.floor(), p.floor()) is not None:
+            ui_coros.append(highlight_tile(p.floor()))
+
+        hero_action = walk_path(maparr, state.hero, p.floor())
 
 
     rl.begin_drawing()
     rl.clear_background(rl.GRAY)
+
     # draw map chunk
-    chunk_offset = (state.hero.pos // VIEW_SIZE) * VIEW_SIZE
-
-
     def get_chunk(pos):
         x, y = pos
         assert chunk_offset[0] <= x < chunk_offset[0] + VIEW_SIZE
@@ -279,6 +297,12 @@ while not rl.window_should_close():
 
     for args in draw_calls:
         rl.draw_texture_pro(*args)
+
+    for coro in ui_coros:
+        try:
+            next(coro)
+        except StopIteration:
+            ui_coros.remove(coro)
 
     rl.end_mode_2d()
 
