@@ -6,6 +6,7 @@ from enum import IntEnum, auto
 from typing import Tuple, List, Optional, Dict, TypeVar, NewType, Union
 import math
 
+
 T = TypeVar("T")
 
 
@@ -131,6 +132,9 @@ SCREEN_HEIGHT = 700
 BLOCK_WIDTH = 32
 BLOCK_HEIGHT = BLOCK_WIDTH // 2
 VIEW_SIZE = 16
+
+if __name__ == '__main__':
+    rl.init_window(SCREEN_WIDTH, SCREEN_HEIGHT, "game")
 
 
 class TileType(IntEnum):
@@ -408,3 +412,12 @@ def step_game(state):
     rl.end_mode_2d()
 
     draw_calls.clear()
+
+if __name__ == '__main__':
+    rl.set_target_fps(60)
+    while not rl.window_should_close():
+        rl.begin_drawing()
+        rl.clear_background(rl.GRAY)
+        step_game(state)
+        rl.end_drawing()
+    rl.close_window()
